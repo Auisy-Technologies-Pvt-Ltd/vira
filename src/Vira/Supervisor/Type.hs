@@ -1,5 +1,6 @@
 module Vira.Supervisor.Type where
 
+import Data.Map.Strict qualified as Map
 import Effectful.Concurrent.Async (Async)
 import System.Exit (ExitCode)
 import Vira.Lib.LogStream (LogStream)
@@ -24,6 +25,11 @@ data TaskSupervisor = TaskSupervisor
   -- ^ Base working directory for all tasks. This assigns `${workDir}/${taskId}/` as $PWD for each task.
   }
   deriving stock (Generic)
+
+getTask :: TaskId -> TaskSupervisor -> IO (Maybe Task)
+getTask taskId supervisor = do
+  tasks <- readMVar $ tasks supervisor
+  pure $ Map.lookup taskId tasks
 
 -- | A task managed by the supervisor
 data Task = Task

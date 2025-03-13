@@ -1,6 +1,5 @@
 {-# HLINT ignore "Use next" #-}
 {-# LANGUAGE RecordWildCards #-}
-{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
 
 module Vira.Supervisor where
 
@@ -11,7 +10,7 @@ import Effectful.Concurrent.Async
 import Effectful.Concurrent.MVar (modifyMVar, modifyMVar_, readMVar)
 import Effectful.FileSystem (FileSystem, createDirectoryIfMissing)
 import Effectful.FileSystem.IO (hClose, openFile)
-import Effectful.Process (CreateProcess (cmdspec), Pid, Process, createPipe, createProcess, getPid, waitForProcess)
+import Effectful.Process (CreateProcess (cmdspec), Pid, Process, createPipe, createProcess, createProcess_, getPid, waitForProcess)
 import System.Directory (getCurrentDirectory, makeAbsolute)
 import System.Directory qualified
 import System.Exit (ExitCode (ExitSuccess))
@@ -71,7 +70,8 @@ startTask supervisor taskId pwd procs h = do
         die $ "Task " <> show taskId <> " already exists"
       else do
         createDirectoryIfMissing True pwd
-        logStream <- liftIO LogStream.newLogStream
+        fileHandle <- openFile (outputLogFile pwd) WriteMode
+        logStream <- liftIO $ LogStream.newLogStream fileHandle
         logToWorkspaceOutput taskId logStream msg
         (readHandle, writeHandle) <- createPipe
         asyncHandle <- async $ do
@@ -79,9 +79,8 @@ startTask supervisor taskId pwd procs h = do
           logToWorkspaceOutput taskId logStream "CI finished"
           pure hdl
         -- Open the file for writing
-        fileHandle <- openFile (outputLogFile pwd) WriteMode
         -- Fork a thread to read from the pipe and handle the merged output
-        void $ liftIO $ forkIO $ LogStream.redirectOutput readHandle fileHandle logStream
+        void $ liftIO $ forkIO $ LogStream.redirectOutput readHandle logStream
         let task = Task {workDir = pwd, asyncHandle, logStream}
         pure (Map.insert taskId task tasks, ())
 
@@ -132,7 +131,7 @@ startTask' taskId pwd writeHandle logStream h = runProcs . toList
       let processSettings =
             Process.alwaysUnderPath pwd
               >>> Process.redirectOutputTo writeHandle
-      (_, _, _, ph) <- createProcess $ proc & processSettings
+      (_, _, _, ph) <- createProcess_ "runProc" $ proc & processSettings
       pid <- getPid ph
       log Debug $ "Task spawned (pid=" <> show pid <> "): " <> show (cmdspec proc)
       exitCode <- waitForProcess ph

@@ -1,3 +1,6 @@
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
+{-# HLINT ignore "Use infinitely" #-}
 module Vira.Lib.LogStream where
 
 import Control.Concurrent.STM (
@@ -15,26 +18,29 @@ import System.IO.Error (ioeGetErrorType, isEOFErrorType)
 data LogStream = LogStream
   { logHistory :: TVar [Text] -- Thread-safe list of all past log entries
   , logChannel :: TChan Text -- Broadcast channel for new log entries
+  , logFileHandle :: Handle -- File handle for persisting log entries as they come by
   }
 
 -- | Create a new log stream
-newLogStream :: IO LogStream
-newLogStream = do
+newLogStream :: Handle -> IO LogStream
+newLogStream fileHandle = do
   history <- newTVarIO [] -- Initialize with empty history
   chan <- newBroadcastTChanIO -- Create a broadcast channel
-  pure $ LogStream history chan
+  pure $ LogStream history chan fileHandle
 
 -- | Write a log entry to the stream
 writeLog :: LogStream -> Text -> IO ()
-writeLog (LogStream history chan) entry = atomically $ do
-  -- Append to history (in reverse order for efficiency, prepending)
-  modifyTVar' history (entry :)
-  -- Broadcast to all subscribed readers
-  writeTChan chan entry
+writeLog (LogStream history chan fileHandle) entry = do
+  hPutStrLn fileHandle entry -- Write to file
+  atomically $ do
+    -- Append to history (in reverse order for efficiency, prepending)
+    modifyTVar' history (entry :)
+    -- Broadcast to all subscribed readers
+    writeTChan chan entry
 
 -- | Subscribe to the log stream, getting history and future updates
 subscribeLog :: LogStream -> IO (TChan Text)
-subscribeLog (LogStream history chan) = atomically $ do
+subscribeLog (LogStream history chan _) = atomically $ do
   -- Get a duplicate channel for this reader
   readerChan <- dupTChan chan
   -- Pre-populate with current history (reversed to maintain order)
@@ -43,12 +49,11 @@ subscribeLog (LogStream history chan) = atomically $ do
   return readerChan
 
 -- | Read from a Handle and write to both a file and a LogStream
-redirectOutput :: Handle -> Handle -> LogStream -> IO ()
-redirectOutput inputHandle fileHandle stream =
+redirectOutput :: Handle -> LogStream -> IO ()
+redirectOutput inputHandle stream =
   do
     forever $ do
       line <- hGetLine inputHandle
-      hPutStrLn fileHandle line -- Write to file
       writeLog stream line -- Write to log stream
     `catch` (\e -> if isEOFError e then pass else throwIO e)
   where
