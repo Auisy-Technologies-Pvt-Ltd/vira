@@ -2,6 +2,7 @@ module Vira.Supervisor.Type where
 
 import Effectful.Concurrent.Async (Async)
 import System.Exit (ExitCode)
+import Vira.Lib.LogStream (LogStream)
 import Vira.State.Type (JobId)
 
 type TaskId = JobId
@@ -30,5 +31,7 @@ data Task = Task
   -- ^ Working directory of this task
   , asyncHandle :: Async ExitCode
   -- ^ The `Async` handle for the task
+  , logStream :: LogStream
+  -- ^ Task process output stream
   }
   deriving stock (Generic)

@@ -4,19 +4,21 @@
 
 module Vira.Supervisor where
 
+import Control.Concurrent (forkIO)
 import Data.Map.Strict qualified as Map
 import Effectful (Eff, IOE, (:>))
 import Effectful.Concurrent.Async
 import Effectful.Concurrent.MVar (modifyMVar, modifyMVar_, readMVar)
 import Effectful.FileSystem (FileSystem, createDirectoryIfMissing)
 import Effectful.FileSystem.IO (hClose, openFile)
-import Effectful.Process (CreateProcess (cmdspec), Pid, Process, createProcess, getPid, waitForProcess)
+import Effectful.Process (CreateProcess (cmdspec), Pid, Process, createPipe, createProcess, getPid, waitForProcess)
 import System.Directory (getCurrentDirectory, makeAbsolute)
 import System.Directory qualified
 import System.Exit (ExitCode (ExitSuccess))
 import System.FilePath ((</>))
 import Vira.App qualified as App
 import Vira.App.Logging
+import Vira.Lib.LogStream qualified as LogStream
 import Vira.Lib.Process qualified as Process
 import Vira.Supervisor.Type
 import Prelude hiding (readMVar)
@@ -69,12 +71,18 @@ startTask supervisor taskId pwd procs h = do
         die $ "Task " <> show taskId <> " already exists"
       else do
         createDirectoryIfMissing True pwd
-        logToWorkspaceOutput taskId pwd msg
+        logStream <- liftIO LogStream.newLogStream
+        logToWorkspaceOutput taskId logStream msg
+        (readHandle, writeHandle) <- createPipe
         asyncHandle <- async $ do
-          hdl <- startTask' taskId pwd h procs
-          logToWorkspaceOutput taskId pwd "CI finished"
+          hdl <- startTask' taskId pwd writeHandle logStream h procs
+          logToWorkspaceOutput taskId logStream "CI finished"
           pure hdl
-        let task = Task {workDir = pwd, asyncHandle}
+        -- Open the file for writing
+        fileHandle <- openFile (outputLogFile pwd) WriteMode
+        -- Fork a thread to read from the pipe and handle the merged output
+        void $ liftIO $ forkIO $ LogStream.redirectOutput readHandle fileHandle logStream
+        let task = Task {workDir = pwd, asyncHandle, logStream}
         pure (Map.insert taskId task tasks, ())
 
 -- Send all output to a file under working directory.
@@ -83,21 +91,23 @@ outputLogFile :: FilePath -> FilePath
 outputLogFile base = base </> "output.log"
 
 -- TODO: In lieu of https://github.com/juspay/vira/issues/6
-logToWorkspaceOutput :: (IOE :> es) => TaskId -> FilePath -> Text -> Eff es ()
-logToWorkspaceOutput taskId base (msg :: Text) = do
+logToWorkspaceOutput :: (IOE :> es) => TaskId -> LogStream.LogStream -> Text -> Eff es ()
+logToWorkspaceOutput taskId logStream (msg :: Text) = do
   let s = "🥕 [vira:job:" <> show taskId <> "] " <> msg <> "\n"
-  appendFileText (outputLogFile base) s
+  liftIO $ LogStream.writeLog logStream s
 
 startTask' ::
   forall es.
   (Process :> es, Log Message :> es, IOE :> es, FileSystem :> es) =>
   TaskId ->
   FilePath ->
+  Handle ->
+  LogStream.LogStream ->
   (ExitCode -> Eff es ()) ->
   -- List of processes to run in sequence
   NonEmpty CreateProcess ->
   Eff es ExitCode
-startTask' taskId pwd h = runProcs . toList
+startTask' taskId pwd writeHandle logStream h = runProcs . toList
   where
     -- Run each process one after another; exiting immediately if any fails
     runProcs :: [CreateProcess] -> Eff es ExitCode
@@ -118,18 +128,17 @@ startTask' taskId pwd h = runProcs . toList
     runProc :: CreateProcess -> Eff es (Maybe Pid, ExitCode)
     runProc proc = do
       log Debug $ "Starting task: " <> show (cmdspec proc)
-      logToWorkspaceOutput taskId pwd $ "Starting task: " <> show (cmdspec proc)
-      outputHandle <- openFile (outputLogFile pwd) AppendMode
+      logToWorkspaceOutput taskId logStream $ "Starting task: " <> show (cmdspec proc)
       let processSettings =
             Process.alwaysUnderPath pwd
-              >>> Process.redirectOutputTo outputHandle
+              >>> Process.redirectOutputTo writeHandle
       (_, _, _, ph) <- createProcess $ proc & processSettings
       pid <- getPid ph
       log Debug $ "Task spawned (pid=" <> show pid <> "): " <> show (cmdspec proc)
       exitCode <- waitForProcess ph
       log Debug $ "Task finished (pid=" <> show pid <> "): " <> show (cmdspec proc)
-      hClose outputHandle
-      logToWorkspaceOutput taskId pwd $ "A task (pid=" <> show pid <> ") finished with exit code " <> show exitCode
+      logToWorkspaceOutput taskId logStream $ "A task (pid=" <> show pid <> ") finished with exit code " <> show exitCode
+      hClose writeHandle
       log Debug "Workspace log done"
       pure (pid, exitCode)
 

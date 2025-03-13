@@ -118,6 +118,7 @@ library
     Vira.Lib.Cachix
     Vira.Lib.Git
     Vira.Lib.HTMX
+    Vira.Lib.LogStream
     Vira.Lib.Omnix
     Vira.Lib.Process
     Vira.Lib.Process.TailF
